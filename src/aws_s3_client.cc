@@ -348,6 +348,9 @@ struct generic_options
   std::string host_;
   std::string port_;
   std::string log_level_;
+  std::string secret_key_file_;
+  std::string access_key_file_;
+  std::string root_certificates_file_;
   int32_t version_ = 11;
 
   void store_generic(const boost::program_options::variables_map & vm)
@@ -355,6 +358,9 @@ struct generic_options
     host_ = vm["host"].as<std::string>();
     port_ = vm["port"].as<std::string>();
     log_level_ = vm["loglevel"].as<std::string>();
+    secret_key_file_ = vm["secret-key-file"].as<std::string>();
+    access_key_file_ = vm["access-key-file"].as<std::string>();
+    root_certificates_file_ = vm["root-certificates-file"].as<std::string>();
     version_ = boost::algorithm::equals("1.0", vm["version"].as<std::string>()) ? 10 : 11;
   }
 };
@@ -416,12 +422,16 @@ static command parse_options(int argc, const char *argv[])
 {
   namespace po = boost::program_options;
 
+  // TODO: Default for root certs work on Debian I believe, but what about other OS/Distros
   // First get global options and the command
   po::options_description global("Global options");
   global.add_options()
     ("host", po::value<std::string>(), "host to connect to")
     ("port", po::value<std::string>(), "port to connect to")
     ("version", po::value<std::string>()->default_value("1.1"), "HTTP version")
+    ("secret-key-file", po::value<std::string>()->default_value((boost::format("%1%/%2%") % getenv("HOME") % "secret_key.txt").str()), "location file containing access key for S3 compatible storage")
+    ("access-key-file", po::value<std::string>()->default_value((boost::format("%1%/%2%") % getenv("HOME") % "access_key.txt").str()), "location file containing secret key for S3 compatible storage")
+    ("root-certificates-file", po::value<std::string>()->default_value("/etc/ssl/certs/ca-certificates.crt"), "file containing trusted root certificates")
     ("loglevel", po::value<std::string>()->default_value("info"), "level of logging : (trace|debug|info|warning|error)")
     ("command", po::value<std::string>(), "command to execute")
     ("subargs", po::value<std::vector<std::string> >(), "Arguments for command");
@@ -550,7 +560,7 @@ int main(int argc, const char** argv)
   std::string secret_key;
   {
     boost::system::error_code ec ;
-    std::ifstream fstr("/home/dblair/secret_key.txt");
+    std::ifstream fstr(generic_args.secret_key_file_);
     std::copy(std::istreambuf_iterator<char>(fstr),
               std::istreambuf_iterator<char>(),
               std::back_inserter(secret_key));
@@ -558,7 +568,7 @@ int main(int argc, const char** argv)
   std::string access_key;
   {
     boost::system::error_code ec ;
-    std::ifstream fstr("/home/dblair/access_key.txt");
+    std::ifstream fstr(generic_args.access_key_file_);
     std::copy(std::istreambuf_iterator<char>(fstr),
               std::istreambuf_iterator<char>(),
               std::back_inserter(access_key));
@@ -578,7 +588,7 @@ int main(int argc, const char** argv)
     // Get root certificate
     {
       boost::system::error_code ec ;
-      std::ifstream fstr("/etc/ssl/certs/ca-certificates.crt");
+      std::ifstream fstr(generic_args.root_certificates_file_);
       std::string cert;
       std::copy(std::istreambuf_iterator<char>(fstr),
                 std::istreambuf_iterator<char>(),
