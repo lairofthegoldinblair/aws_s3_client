@@ -1,4 +1,5 @@
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/algorithm/string/trim_all.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/ssl.hpp>
 #include <boost/beast/version.hpp>
@@ -351,6 +352,8 @@ struct generic_options
   std::string secret_key_file_;
   std::string access_key_file_;
   std::string root_certificates_file_;
+  std::string invocation_id_;
+  std::string request_date_;
   int32_t version_ = 11;
 
   void store_generic(const boost::program_options::variables_map & vm)
@@ -361,6 +364,8 @@ struct generic_options
     secret_key_file_ = vm["secret-key-file"].as<std::string>();
     access_key_file_ = vm["access-key-file"].as<std::string>();
     root_certificates_file_ = vm["root-certificates-file"].as<std::string>();
+    invocation_id_ = vm["amz-sdk-invocation-id"].as<std::string>();
+    request_date_ = vm["x-amz-date"].as<std::string>();
     version_ = boost::algorithm::equals("1.0", vm["version"].as<std::string>()) ? 10 : 11;
   }
 };
@@ -427,11 +432,13 @@ static command parse_options(int argc, const char *argv[])
   po::options_description global("Global options");
   global.add_options()
     ("host", po::value<std::string>(), "host to connect to")
-    ("port", po::value<std::string>(), "port to connect to")
+    ("port", po::value<std::string>()->default_value("443"), "port to connect to")
     ("version", po::value<std::string>()->default_value("1.1"), "HTTP version")
     ("secret-key-file", po::value<std::string>()->default_value((boost::format("%1%/%2%") % getenv("HOME") % "secret_key.txt").str()), "location file containing access key for S3 compatible storage")
     ("access-key-file", po::value<std::string>()->default_value((boost::format("%1%/%2%") % getenv("HOME") % "access_key.txt").str()), "location file containing secret key for S3 compatible storage")
     ("root-certificates-file", po::value<std::string>()->default_value("/etc/ssl/certs/ca-certificates.crt"), "file containing trusted root certificates")
+    ("amz-sdk-invocation-id", po::value<std::string>()->default_value(""), "optional invocation id, will be generated if not-specified")
+    ("x-amz-date", po::value<std::string>()->default_value(""), "optional request and signing timestamp in ISO format, will be generated if not-specified")
     ("loglevel", po::value<std::string>()->default_value("info"), "level of logging : (trace|debug|info|warning|error)")
     ("command", po::value<std::string>(), "command to execute")
     ("subargs", po::value<std::vector<std::string> >(), "Arguments for command");
@@ -556,7 +563,7 @@ int main(int argc, const char** argv)
   
   init_logging(generic_args.log_level_);
 
-  // Get signing key
+  // Get signing keys
   std::string secret_key;
   {
     boost::system::error_code ec ;
@@ -565,6 +572,7 @@ int main(int argc, const char** argv)
               std::istreambuf_iterator<char>(),
               std::back_inserter(secret_key));
   }
+  boost::algorithm::trim_all(secret_key);
   std::string access_key;
   {
     boost::system::error_code ec ;
@@ -573,6 +581,7 @@ int main(int argc, const char** argv)
               std::istreambuf_iterator<char>(),
               std::back_inserter(access_key));
   }
+  boost::algorithm::trim_all(access_key);
 
   const char * host = generic_args.host_.c_str();
   const char * port = generic_args.port_.c_str();
@@ -609,12 +618,13 @@ int main(int argc, const char** argv)
     bool xml_body = false;
     boost::beast::http::request<boost::beast::http::string_body> r;
 
+    std::string invocation_id = generic_args.invocation_id_.size () ? generic_args.invocation_id_ : boost::uuids::to_string(boost::uuids::random_generator()());
     if (auto * specific_args = boost::get<abort_multipart_upload_command_options>(&args)) {
       r.version(specific_args->version_);
       r.method(http::verb::delete_);
       r.target((boost::format("/%1%?uploadId=%2%") % specific_args->key_ % specific_args->upload_id_).str());
       r.set(http::field::host, specific_args->bucket_ + "." + specific_args->host_);
-      r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+      r.set("amz-sdk-invocation-id", invocation_id);
       r.set("amz-sdk-request", "attempt=1");
       xml_body = false;
     } else if (auto * specific_args = boost::get<get_object_command_options>(&args)) {
@@ -623,7 +633,7 @@ int main(int argc, const char** argv)
       r.method(http::verb::get);
       r.target((boost::format("/%1%") % specific_args->key_).str());
       r.set(http::field::host, specific_args->bucket_ + "." + specific_args->host_);
-      r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+      r.set("amz-sdk-invocation-id", invocation_id);
       r.set("amz-sdk-request", "attempt=1");
       xml_body = false;
     } else if (auto * specific_args = boost::get<list_buckets_command_options>(&args)) {
@@ -632,7 +642,7 @@ int main(int argc, const char** argv)
       r.method(http::verb::get);
       r.target("/");
       r.set(http::field::host, specific_args->host_);
-      r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+      r.set("amz-sdk-invocation-id", invocation_id);
       r.set("amz-sdk-request", "attempt=1");
       xml_body = true;
     } else if (auto * specific_args = boost::get<list_objects_command_options>(&args)) {
@@ -641,7 +651,7 @@ int main(int argc, const char** argv)
       r.method(http::verb::get);
       r.target("/");
       r.set(http::field::host, specific_args->bucket_ + "." + specific_args->host_);
-      r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+      r.set("amz-sdk-invocation-id", invocation_id);
       r.set("amz-sdk-request", "attempt=1");
       xml_body = true;
     } else if (auto * specific_args = boost::get<list_multipart_uploads_command_options>(&args)) {
@@ -650,7 +660,7 @@ int main(int argc, const char** argv)
       r.method(http::verb::get);
       r.target("/?uploads");
       r.set(http::field::host, specific_args->bucket_ + "." + specific_args->host_);
-      r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+      r.set("amz-sdk-invocation-id", invocation_id);
       r.set("amz-sdk-request", "attempt=1");
       xml_body = true;
     }
@@ -663,7 +673,7 @@ int main(int argc, const char** argv)
     //   r.set(http::field::content_type, "application/xml");
     //   r.set("x-amz-acl", "private");
     //   r.set("x-amz-api-version", "2006-03-01");
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     //   r.content_length(0);
     //   xml_body = true;
@@ -677,7 +687,7 @@ int main(int argc, const char** argv)
     //   r.target(target);
     //   r.set(http::field::host, host);
     //   r.set(http::field::content_type, "binary/octet-stream");
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     //   r.content_length(body.size());
     //   r.body() = std::move(body);
@@ -692,7 +702,7 @@ int main(int argc, const char** argv)
     //   r.set(http::field::host, host);
     //   r.set(http::field::content_type, "application/xml");
     //   r.set("x-amz-api-version", "2006-03-01");
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     //   r.content_length(body.size());
     //   r.body() = std::move(body);
@@ -705,7 +715,7 @@ int main(int argc, const char** argv)
     //   r.set("x-amz-acl", "private");
     //   r.target(target);
     //   r.set(http::field::host, host);
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     // }
     // {
@@ -717,7 +727,7 @@ int main(int argc, const char** argv)
     //   r.set("x-amz-acl", "private");
     //   r.target(target);
     //   r.set(http::field::host, host);
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     //   r.content_length(body.size());
     //   r.body() = std::move(body);
@@ -728,14 +738,17 @@ int main(int argc, const char** argv)
     //   r.method(http::verb::delete_);
     //   r.target(target);
     //   r.set(http::field::host, host);
-    //   r.set("amz-sdk-invocation-id", boost::uuids::to_string(boost::uuids::random_generator()()));
+    //   r.set("amz-sdk-invocation-id", invocation_id);
     //   r.set("amz-sdk-request", "attempt=1");
     // }
     
     aws::v4_signer signer(secret_key, access_key, "us-east-1", "s3");
-    // boost::posix_time::ptime ts = boost::posix_time::from_iso_string("20221026T212500");
-    // signer.sign_request(r,ts);
-    signer.sign_request(r);
+    if (generic_args.request_date_.empty()) {
+      signer.sign_request(r);
+    } else {
+      boost::posix_time::ptime ts = boost::posix_time::from_iso_string(generic_args.request_date_);
+      signer.sign_request(r,ts);
+    }
 
     std::stringstream sstr;
     auto response_body_handler = [&sstr](boost::beast::string_view v) {
